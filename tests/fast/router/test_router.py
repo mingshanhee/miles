@@ -138,6 +138,28 @@ class TestLoadBalancing:
         assert selected == "http://w2:8000"
         assert router.worker_request_counts["http://w2:8000"] == 3
 
+    def test_use_url_with_routing_key_is_deterministic(self, router_factory):
+        router = router_factory()
+        headers = {"X-SMG-Routing-Key": "session-123"}
+
+        router.worker_request_counts = {"http://w1:8000": 5, "http://w2:8000": 0, "http://w3:8000": 8}
+        first_selected = router._use_url(headers=headers)
+        router._finish_url(first_selected)
+
+        router.worker_request_counts = {"http://w1:8000": 0, "http://w2:8000": 9, "http://w3:8000": 1}
+        second_selected = router._use_url(headers=headers)
+
+        assert second_selected == first_selected
+
+    def test_use_url_with_routing_key_excludes_dead_workers(self, router_factory):
+        router = router_factory()
+        router.worker_request_counts = {"http://w1:8000": 0, "http://w2:8000": 0, "http://w3:8000": 0}
+        router.dead_workers = {"http://w2:8000"}
+
+        selected = router._use_url(headers={"X-SMG-Routing-Key": "session-123"})
+
+        assert selected != "http://w2:8000"
+
     def test_use_url_excludes_dead_workers(self, router_factory):
         router = router_factory()
         router.worker_request_counts = {"http://w1:8000": 5, "http://w2:8000": 1, "http://w3:8000": 3}
@@ -195,6 +217,34 @@ class TestProxyIntegration:
         all_requests = worker1.request_log + worker2.request_log
         assert len(all_requests) == 4
         assert all(req == payload for req in all_requests)
+
+    def test_proxy_routes_same_key_to_same_worker_even_when_load_changes(self, router_env: RouterEnv, mock_worker_factory):
+        worker1, worker2 = mock_worker_factory(), mock_worker_factory()
+        requests.post(f"{router_env.url}/add_worker", params={"url": worker1.url}, timeout=5.0).raise_for_status()
+        requests.post(f"{router_env.url}/add_worker", params={"url": worker2.url}, timeout=5.0).raise_for_status()
+
+        payload = {"input_ids": [1, 2, 3], "return_logprob": True}
+        headers = {"X-SMG-Routing-Key": "session-123"}
+
+        first = requests.post(f"{router_env.url}/generate", json=payload, headers=headers, timeout=10.0)
+        first.raise_for_status()
+
+        if len(worker1.request_log) == 1:
+            selected_worker = worker1
+            other_worker = worker2
+        else:
+            selected_worker = worker2
+            other_worker = worker1
+
+        router_env.router.worker_request_counts[selected_worker.url] += 1
+        try:
+            second = requests.post(f"{router_env.url}/generate", json=payload, headers=headers, timeout=10.0)
+            second.raise_for_status()
+        finally:
+            router_env.router.worker_request_counts[selected_worker.url] -= 1
+
+        assert len(selected_worker.request_log) == 2
+        assert len(other_worker.request_log) == 0
 
     def test_proxy_health_endpoint(self, router_env: RouterEnv, mock_worker: MockSGLangServer):
         requests.post(f"{router_env.url}/add_worker", params={"url": mock_worker.url}, timeout=5.0)

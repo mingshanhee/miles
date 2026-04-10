@@ -53,11 +53,7 @@ class SessionServer:
 
         if body is None:
             body = await request.body()
-        if headers is None:
-            headers = dict(request.headers)
-        headers = {
-            k: v for k, v in headers.items() if k.lower() not in ("content-length", "transfer-encoding", "host")
-        }
+        headers = self.build_proxy_headers(request, headers=headers)
 
         try:
             response = await self.client.request(request.method, url, content=body, headers=headers)
@@ -77,6 +73,21 @@ class SessionServer:
             "status_code": response.status_code,
             "headers": dict(response.headers),
         }
+
+    def build_proxy_headers(
+        self,
+        request: Request,
+        headers: dict | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, str]:
+        if headers is None:
+            headers = dict(request.headers)
+        proxy_headers = {
+            k: v for k, v in headers.items() if k.lower() not in ("content-length", "transfer-encoding", "host")
+        }
+        if session_id is not None:
+            proxy_headers["X-SMG-Routing-Key"] = session_id
+        return proxy_headers
 
     def build_proxy_response(self, result: dict) -> Response:
         content = result["response_body"]

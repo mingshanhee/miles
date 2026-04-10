@@ -60,6 +60,7 @@ class MockSGLangServer:
         self._server: UvicornThreadServer | None = None
 
         self.request_log: list[dict] = []
+        self.request_headers_log: list[dict[str, str]] = []
         self._concurrency = Counter()
 
         self._setup_routes()
@@ -70,6 +71,7 @@ class MockSGLangServer:
 
     def reset_stats(self):
         self.request_log.clear()
+        self.request_headers_log.clear()
         self._concurrency.reset()
 
     def start(self):
@@ -104,6 +106,7 @@ class MockSGLangServer:
     async def _handle_generate_like_request(self, request: Request, compute_fn: Callable[[dict], dict]):
         payload = await request.json()
         self.request_log.append(payload)
+        self.request_headers_log.append(dict(request.headers))
         with self._concurrency.track():
             if self.latency > 0:
                 await asyncio.sleep(self.latency)

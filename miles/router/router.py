@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 
@@ -144,18 +145,19 @@ class MilesRouter:
         headers: dict | None = None,
     ) -> dict:
         """Core proxy logic. Returns dict with request_body, response_body, status_code, headers."""
-        worker_url = self._use_url()
+        request_headers = dict(request.headers) if headers is None else dict(headers)
+        worker_url = self._use_url(headers=request_headers)
         url = f"{worker_url}/{path}"
 
         if body is None:
             body = await request.body()
-        if headers is None:
-            headers = dict(request.headers)
         if body is not None:
-            headers = {k: v for k, v in headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
+            request_headers = {
+                k: v for k, v in request_headers.items() if k.lower() not in ("content-length", "transfer-encoding")
+            }
 
         try:
-            response = await self.client.request(request.method, url, content=body, headers=headers)
+            response = await self.client.request(request.method, url, content=body, headers=request_headers)
             content = await response.aread()
             return {
                 "request_body": body,
@@ -213,19 +215,36 @@ class MilesRouter:
         """List all registered workers"""
         return {"urls": list(self.worker_request_counts.keys())}
 
-    def _use_url(self):
-        """Select worker URL with minimal active requests."""
+    @staticmethod
+    def _extract_routing_key(headers: dict | None) -> str | None:
+        if not headers:
+            return None
+        for key, value in headers.items():
+            if key.lower() == "x-smg-routing-key" and value:
+                return value
+        return None
 
-        if not self.dead_workers:
-            # Healthy path: select from all workers
-            url = min(self.worker_request_counts, key=self.worker_request_counts.get)
+    @staticmethod
+    def _rendezvous_score(routing_key: str, worker_url: str) -> int:
+        digest = hashlib.blake2b(f"{routing_key}\0{worker_url}".encode("utf-8"), digest_size=16).digest()
+        return int.from_bytes(digest, byteorder="big")
+
+    def _select_affinity_url(self, valid_workers: list[str], routing_key: str) -> str:
+        # Stateless rendezvous hashing keeps a routing key pinned to one healthy worker.
+        return max(valid_workers, key=lambda worker_url: self._rendezvous_score(routing_key, worker_url))
+
+    def _use_url(self, headers: dict | None = None):
+        """Select a healthy worker, honoring X-SMG-Routing-Key when present."""
+
+        valid_workers = [w for w in self.worker_request_counts if w not in self.dead_workers]
+        if not valid_workers:
+            raise RuntimeError("No healthy workers available in the pool") from None
+
+        routing_key = self._extract_routing_key(headers)
+        if routing_key:
+            url = self._select_affinity_url(valid_workers, routing_key)
         else:
-            # Degraded path: select from workers not in dead_workers
-            valid_workers = (w for w in self.worker_request_counts if w not in self.dead_workers)
-            try:
-                url = min(valid_workers, key=self.worker_request_counts.get)
-            except ValueError:
-                raise RuntimeError("No healthy workers available in the pool") from None
+            url = min(valid_workers, key=self.worker_request_counts.get)
 
         self.worker_request_counts[url] += 1
         return url

@@ -170,7 +170,8 @@ def setup_session_routes(app, backend, args):
             # --- lock released here ---
 
             # --- Phase 2: proxy to SGLang (NO lock held) ---
-            result = await backend.do_proxy(request, "v1/chat/completions", body=body)
+            proxy_headers = backend.build_proxy_headers(request, session_id=session_id)
+            result = await backend.do_proxy(request, "v1/chat/completions", body=body, headers=proxy_headers)
 
             # If SGLang returned a non-200 error (e.g. 400 for context too long),
             # pass it through to the agent without recording — the agent can retry
@@ -248,5 +249,6 @@ def setup_session_routes(app, backend, args):
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def session_proxy(request: Request, session_id: str, path: str):
-        result = await backend.do_proxy(request, path)
+        proxy_headers = backend.build_proxy_headers(request, session_id=session_id)
+        result = await backend.do_proxy(request, path, headers=proxy_headers)
         return backend.build_proxy_response(result)
